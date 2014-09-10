@@ -1,0 +1,10 @@
+[global]
+master_dns = ns1.example.com
+slaves = ns2.example.com
+admin_contact = hostmaster.example.com
+
+[postgres]
+database = powerdns
+host = 127.0.0.1
+user = powerdns
+password = changeme

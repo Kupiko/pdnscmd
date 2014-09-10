@@ -2,15 +2,54 @@
 # encoding: utf-8
 
 import cmd
+import sys
 import psycopg2
 from datetime import datetime
+import configparser
 
-MASTER_DNS = 'nstest1.dev.annttu.fi'
-SLAVES = ['nstest2.dev.annttu.fi']
-ADMIN_CONTACT = 'annttu.annttu.fi'
+config = configparser.ConfigParser()
+config.read('/etc/pdnscmd.conf')
 
+try:
+    MASTER_DNS = config.get('global', 'master_dns')
+except configparser.NoOptionError:
+    MASTER_DNS = 'example.com'
+try:
+    SLAVES = [x.strip() for x in config.get('global', 'slaves').split(',')]
+except configparser.NoOptionError:
+    SLAVES = ['ns2.example.com']
+try:
+    ADMIN_CONTACT = config.get('global', 'admin_contact')
+except configparser.NoOptionError:
+    ADMIN_CONTACT = 'hostmaster.example.com'
 
-dbconn = conn = psycopg2.connect("dbname=dns user=powerdns password=powerdns host=127.0.0.1")
+try:
+    dbname = config.get('postgres', 'database')
+except configparser.NoOptionError:
+    dbname = 'postgres'
+try:
+    dbuser = config.get('postgres', 'user')
+except configparser.NoOptionError:
+    dbuser = 'powerdns'
+try:
+    dbhost = config.get('postgres', 'host')
+except configparser.NoOptionError:
+    dbhost = '127.0.0.1'
+try:
+    password = config.get('postgres', 'password')
+except configparser.NoOptionError:
+    password = None
+    f = open("/etc/powerdns/pdns.d/pdns.local.gpgsql",'r')
+    for line in f.readlines():
+        if line.startswith('gpgsql-password='):
+            password = line.split('=',1)[1]
+    f.close()
+
+    if not password:
+        print("Cannot find postgres password")
+        sys.exit(1)
+
+dbconn = conn = psycopg2.connect("dbname=%s user=%s password=%s host=%s" % (dbname, dbuser, password, dbhost))
 db = conn.cursor()
 
 class CommandException(Exception):
