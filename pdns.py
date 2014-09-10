@@ -358,5 +358,17 @@ class DNSCommander(cmd.Cmd):
         except CommandException as e:
             print('Error: %s' % e)
 
+
+    def do_list(self, line):
+        """List Domains/records"""
+        if self.current_domain:
+            db.execute("SELECT key, type, ttl, coalesce(priority::text,''), value FROM dns_records WHERE zone_id = %s ORDER BY key, type, value", (self.current_domain.zone_id,))
+            for row in db.fetchall():
+                print("{0:<20} {2:<6} {1:<5} {3:>4} {4}".format(*row))
+        else:
+            db.execute("SELECT name, notified_serial FROM dns_zones ORDER BY name")
+            for row in db.fetchall():
+                print("{0:<20} {1:>12}".format(*row))
+
 if __name__ == '__main__':
     DNSCommander().cmdloop()
