@@ -252,7 +252,7 @@ class DNSCommander(cmd.Cmd):
             raise CommandException("Cannot parse %s" % line)
         key = parts[0].strip()
         record_type = parts[1].strip()
-        if parts[1] in ['TXT','A','AAAA','NS']:
+        if parts[1] in ['TXT','A','AAAA','NS', 'CNAME']:
             parts = line.split(None, 3)
             if len(parts) == 4:
                 ttl = self.parse_ttl(parts[2])
@@ -318,7 +318,7 @@ class DNSCommander(cmd.Cmd):
            add key type [ttl] [priority] [weight] [port] value
 
         Key is for example www
-        type is record type, one of A, AAAA, TXT, NS, MX, SRV
+        type is record type, one of A, AAAA, CNAME, TXT, NS, MX, SRV
         ttl is opional time to live value
         priority is used with MX and SRV records
         weight and port are SRV specific values
