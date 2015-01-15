@@ -137,7 +137,7 @@ class Domain(Task):
     def create(self):
         if self.exists():
             return
-        db.execute("INSERT INTO dns_zones (name, rname, refresh, retry, expire, ttl, negative_ttl, nameservers, last_check, notified_serial, type, master) VALUES (%s, %s, 3600 ,900, 68400, 360, 900, %s, NULL, 0, 'MASTER', %s) RETURNING id", (self.domain, ADMIN_CONTACT, [MASTER_DNS] + SLAVES, MASTER_DNS))
+        db.execute("INSERT INTO dns_zones (name, rname, nameservers, last_check, notified_serial, type, master) VALUES (%s, %s, %s, NULL, 0, 'MASTER', %s) RETURNING id", (self.domain, ADMIN_CONTACT, [MASTER_DNS] + SLAVES, MASTER_DNS))
         res = db.fetchone()
         self.zone_id = int(res[0])
         db.execute("INSERT INTO dns_records (key, type, ttl, value, zone_id) VALUES (%s, 'SOA', 360, %s, %s)" , (self.domain, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), self.zone_id))
@@ -272,6 +272,17 @@ class DNSCommander(cmd.Cmd):
                 value = parts[3]
             else:
                 raise CommandException("Cannot parse %s" % line)
+        elif parts[1] in ['PTR']:
+            parts = line.split(None, 3)
+            if len(parts) == 4:
+                ttl = self.parse_ttl(parts[2])
+                value = parts[3]
+            elif len(parts) == 3:
+                value = parts[2]
+            else:
+                raise CommandException("Cannot parse %s" % line)
+            if not value.endswith('.'):
+                value = "%s." % value
         elif parts[1] not in ['SRV']:
             if len(parts) == 7:
                 ttl = self.parse_ttl(parts[2])
@@ -318,7 +329,7 @@ class DNSCommander(cmd.Cmd):
            add key type [ttl] [priority] [weight] [port] value
 
         Key is for example www
-        type is record type, one of A, AAAA, CNAME, TXT, NS, MX, SRV
+        type is record type, one of A, AAAA, CNAME, TXT, NS, MX, SRV, PTR
         ttl is opional time to live value
         priority is used with MX and SRV records
         weight and port are SRV specific values
