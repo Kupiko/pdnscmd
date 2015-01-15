@@ -62,6 +62,9 @@ class Task(object):
     def execute(self):
         return True
 
+    def show(self):
+        return ""
+
 class Record(Task):
     def __init__(self, key, rtype, value, ttl, priority, weight, port, domain, delete=False):
         if key == '@':
@@ -93,6 +96,17 @@ class Record(Task):
             return True
         return False
 
+    def show(self):
+        args = [('key', self.key), ('type', self.rtype), ('value', self.value)]
+        for k, v in (('ttl', self.ttl), ('priority', self.priority), ('weight', self.weight), ('port', self.port)):
+            if v is not None:
+                args.append((k,v))
+        record = ' and '.join([ "%s=%s" % (k,v) for k,v in args])
+        if self.delete:
+            return "DELETE record %s" % record
+        else:
+            return "ADD record %s" % record
+
 
 class Domain(Task):
     def __init__(self, domain):
@@ -113,6 +127,11 @@ class Domain(Task):
         else:
             return False
 
+    def show(self):
+        if not self.exists():
+            return "ADD domain %s" % self.domain
+        return ""
+
     def exists_record(self, key, rtype, value, priority=None, weight=None, port=None):
         if key == '@':
             key = self.domain
@@ -121,13 +140,13 @@ class Domain(Task):
         query = "SELECT id from dns_records WHERE zone_id = %s and key = %s and type = %s and value = %s"
         args = [self.zone_id, key, rtype, value]
         if priority is not None:
-            query = "%s and priority = %s"
+            query += " and priority = %s"
             args.append(priority)
         if weight is not None:
-            query = "%s and weight = %s"
+            query += " and weight = %s"
             args.append(weight)
         if port is not None:
-            query = "%s and port = %s"
+            query += " and port = %s"
             args.append(port)
         db.execute(query, args)
         if db.fetchone() is None:
@@ -195,6 +214,7 @@ class DNSCommander(cmd.Cmd):
         """Commit changes"""
         for t in self.todoqueue:
             t.execute()
+        self.todoqueue = []
         if self.update_serial:
             self.current_domain.inc_serial()
         dbconn.commit()
@@ -202,6 +222,7 @@ class DNSCommander(cmd.Cmd):
 
 
     def do_revert(self, line):
+        """Revert changes"""
         self.todoqueue = []
         dbconn.rollback()
         self.reset_prompt()
@@ -283,9 +304,11 @@ class DNSCommander(cmd.Cmd):
                 raise CommandException("Cannot parse %s" % line)
             if not value.endswith('.'):
                 value = "%s." % value
-        elif parts[1] not in ['SRV']:
+        elif parts[1] in ['SRV', 'TLSA']:
+            if len(parts) > 3 and parts[1] == 'IN':
+                parts = parts[0] + parts[2:]
             if len(parts) == 7:
-                ttl = self.parse_ttl(parts[2])
+                ttl = self.parse_ttl(parts[1])
                 priority = self.parse_priority(parts[3])
                 weight = self.parse_weight(parts[4])
                 port = self.parse_weight(parts[5])
@@ -302,21 +325,7 @@ class DNSCommander(cmd.Cmd):
             else:
                 raise CommandException("Cannot parse %s" % line)
         else:
-            parts = line.split(None,5)
-            if len(parts) == 6:
-                ttl = self.parse_ttl(parts[2])
-                priority = self.parse_priority(parts[3])
-                weight = self.parse_weight(parts[4])
-                value = parts[5]
-            elif len(parts) == 5:
-                priority = self.parse_priority(parts[2])
-                weight = self.parse_weight(parts[3])
-                value = parts[4]
-            elif len(parts) == 4:
-                weight = self.parse_weight(parts[2])
-                value = parts[3]
-            else:
-                raise CommandException("Cannot parse %s" % line)
+            raise CommandException("Cannot parse %s" % line)
 
         if not self.current_domain:
             raise CommandException("Select domain first!")
@@ -369,6 +378,12 @@ class DNSCommander(cmd.Cmd):
         except CommandException as e:
             print('Error: %s' % e)
 
+
+    def do_show(self, line):
+        """Show changes to do
+        """
+        for thing in self.todoqueue:
+            print(thing.show())
 
     def do_list(self, line):
         """List Domains/records"""
