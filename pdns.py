@@ -286,10 +286,10 @@ class DNSCommander(cmd.Cmd):
             parts = line.split(None, 4)
             if len(parts) == 5:
                 ttl = self.parse_ttl(parts[2])
-                weight = self.parse_weight(parts[3])
+                priority = self.parse_priority(parts[3])
                 value = parts[4]
             elif len(parts) == 4:
-                weight = self.parse_weight(parts[2])
+                priority = self.parse_priority(parts[2])
                 value = parts[3]
             else:
                 raise CommandException("Cannot parse %s" % line)
