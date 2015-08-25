@@ -83,6 +83,7 @@ class Record(Task):
     def execute(self):
         args = ['key','type', 'value', 'zone_id']
         values = [self.key, self.rtype, self.value, self.domain.zone_id]
+        self.domain.clear_records()
         for k, v in (('ttl', self.ttl), ('priority', self.priority), ('weight', self.weight), ('port', self.port)):
             if v is not None:
                 args.append(k)
@@ -111,6 +112,7 @@ class Record(Task):
 class Domain(Task):
     def __init__(self, domain):
         self.domain = domain
+        self._records = []
         self.zone_id = None
 
     def validate(self):
@@ -131,6 +133,18 @@ class Domain(Task):
         if not self.exists():
             return "ADD domain %s" % self.domain
         return ""
+
+    def clear_records(self):
+        self._records = []
+
+    def update_records(self):
+        db.execute("SELECT key, type, ttl, coalesce(priority::text,''), value FROM dns_records WHERE zone_id = %s ORDER BY key, type, value", (self.zone_id,))
+        self._records = [{'key': x[0], 'type': x[1], 'ttl': x[2], 'priority': x[3], 'value': x[4]} for x in db.fetchall()]
+
+    def records(self):
+        if not self._records:
+            self.update_records()
+        return self._records
 
     def exists_record(self, key, rtype, value, priority=None, weight=None, port=None):
         if key == '@':
@@ -218,14 +232,14 @@ class DNSCommander(cmd.Cmd):
         if self.update_serial:
             self.current_domain.inc_serial()
         dbconn.commit()
-        self.reset_prompt()
+        #self.reset_prompt()
 
 
     def do_revert(self, line):
         """Revert changes"""
         self.todoqueue = []
         dbconn.rollback()
-        self.reset_prompt()
+        #self.reset_prompt()
 
     def parse_ttl(self, ttl):
         try:
@@ -344,6 +358,9 @@ class DNSCommander(cmd.Cmd):
         weight and port are SRV specific values
         """
         key, record_type, value, ttl, priority, weight, port = self.parse_record(line)
+        key = key.rstrip(".")
+        if key.endswith(self.current_domain.domain):
+            key = key[:-len(self.current_domain.domain)-1]
         if self.current_domain.exists_record(key, record_type, value, priority=priority, weight=weight, port=port):
             raise CommandException("Record already exists!")
 
@@ -357,13 +374,53 @@ class DNSCommander(cmd.Cmd):
             delete key type [ttl] [priority] [weight] [port] value
         """
         key, record_type, value, ttl, priority, weight, port = self.parse_record(line)
+        key = key.rstrip(".")
+        if key.endswith(self.current_domain.domain):
+            key = key[:-len(self.current_domain.domain)-1]
+        print("KEY: %s" % key)
         if not self.current_domain.exists_record(key, record_type, value, priority=priority, weight=weight, port=port):
             raise CommandException("Record does not exists!")
         r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain, delete=True)
         self.todoqueue.append(r)
         self.update_serial = True
 
+    def complete_delete(self, text, line, beginidx, endidx):
+        records = self.current_domain.records()
+        l = len(line.split())
+        if l == 1 or (l == 2 and text):
+            if text:
+                full_text = line.split()[-1]
+            else:
+                full_text = text
+            diff = len(full_text) - len(text)
+            record_set = [y['key'][diff:] for y in records if y['key'].startswith(full_text)]
+            # Make list unique
+            return list(set(record_set))
+        elif l == 2 or (l == 3 and text):
+            key = line.split()[1].strip()
+            #print("B: %s" % key)
+            types = []
+            for y in records:
+                #print("%s %s %s" % (y['key'], y['key'] == key, key))
+                if y['key'] == key:
+                    #print("%s type: %s value: %s" % (y['key'], y['type'], y['value']))
+                    if y['type'] not in types:
+                        types.append(y['type'])
+            return [x for x in types if x.startswith(text)]
+        elif l == 3 or (l == 4 and text):
+            key, key_type = line.split()[1:3]
+            if text:
+                full_text = line.split()[-1]
+            else:
+                full_text = text
+            diff = len(full_text) - len(text)
+            return list(set([x['value'][diff:] for x in records if x['key'] == key and x['type'] == key_type and x['value'].startswith(text)]))
+        return []
+
     def do_EOF(self, line):
+        if self.todoqueue:
+            print("Revert first")
+            return False
         if self.current_domain:
             self.current_domain = None
             print("")
@@ -382,19 +439,24 @@ class DNSCommander(cmd.Cmd):
     def do_show(self, line):
         """Show changes to do
         """
+        if not self.todoqueue:
+            print("Nothing changed, did you mean list?")
+            return
         for thing in self.todoqueue:
             print(thing.show())
 
     def do_list(self, line):
         """List Domains/records"""
         if self.current_domain:
-            db.execute("SELECT key, type, ttl, coalesce(priority::text,''), value FROM dns_records WHERE zone_id = %s ORDER BY key, type, value", (self.current_domain.zone_id,))
-            for row in db.fetchall():
-                print("{0:<20} {2:<6} {1:<5} {3:>4} {4}".format(*row))
+            for row in self.current_domain.records():
+                print("{key:<40} {ttl:<6} {type:<5} {priority:>4} {value}".format(**row))
         else:
-            db.execute("SELECT name, notified_serial FROM dns_zones ORDER BY name")
-            for row in db.fetchall():
+            for row in self.get_domains():
                 print("{0:<20} {1:>12}".format(*row))
+
+    def get_domains(self):
+        db.execute("SELECT name, notified_serial FROM dns_zones ORDER BY name")
+        db.fetchall()
 
 if __name__ == '__main__':
     DNSCommander().cmdloop()
