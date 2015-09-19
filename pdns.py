@@ -173,7 +173,7 @@ class Domain(Task):
         db.execute("INSERT INTO dns_zones (name, rname, nameservers, last_check, notified_serial, type, master) VALUES (%s, %s, %s, NULL, 0, 'MASTER', %s) RETURNING id", (self.domain, ADMIN_CONTACT, [MASTER_DNS] + SLAVES, MASTER_DNS))
         res = db.fetchone()
         self.zone_id = int(res[0])
-        db.execute("INSERT INTO dns_records (key, type, ttl, value, zone_id) VALUES (%s, 'SOA', 360, %s, %s)" , (self.domain, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), self.zone_id))
+        db.execute("INSERT INTO dns_records (key, type, ttl, value, priority, zone_id) VALUES (%s, 'SOA', 360, %s, %s, %s)" , (self.domain, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), '0', self.zone_id))
         for i in [MASTER_DNS] + SLAVES:
             db.execute("INSERT INTO dns_records (key, type, ttl, value, zone_id) VALUES (%s, 'NS', 360, %s, %s)" , (self.domain, i, self.zone_id))
 
@@ -377,7 +377,6 @@ class DNSCommander(cmd.Cmd):
         key = key.rstrip(".")
         if key.endswith(self.current_domain.domain):
             key = key[:-len(self.current_domain.domain)-1]
-        print("KEY: %s" % key)
         if not self.current_domain.exists_record(key, record_type, value, priority=priority, weight=weight, port=port):
             raise CommandException("Record does not exists!")
         r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain, delete=True)
