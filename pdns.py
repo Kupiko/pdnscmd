@@ -201,6 +201,7 @@ class DNSCommander(cmd.Cmd):
 
     def do_domain(self, line):
         """Select and add new domain"""
+        line = line.rstrip('.')
         d = Domain(line)
         d.validate()
         if not d.exists():
