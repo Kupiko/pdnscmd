@@ -111,7 +111,7 @@ class Record(Task):
 
 class Domain(Task):
     def __init__(self, domain):
-        self.domain = domain
+        self.domain = domain.rstrip('.')
         self._records = []
         self.zone_id = None
 
