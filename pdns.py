@@ -65,8 +65,15 @@ class Task(object):
     def show(self):
         return ""
 
+
+class RecordActions(object):
+    DELETE=1
+    UPDATE=2
+    ADD=2
+
+
 class Record(Task):
-    def __init__(self, key, rtype, value, ttl, priority, weight, port, domain, delete=False):
+    def __init__(self, key, rtype, value, ttl, priority, weight, port, domain, action=RecordActions.ADD):
         if key == '@':
             self.key = domain.domain
         else:
@@ -78,7 +85,7 @@ class Record(Task):
         self.weight = weight
         self.port = port
         self.domain = domain
-        self.delete = delete
+        self.action = action
 
     def execute(self):
         args = ['key','type', 'value', 'zone_id']
@@ -89,10 +96,12 @@ class Record(Task):
                 args.append(k)
                 values.append(v)
 
-        if self.delete:
+        if self.action == RecordActions.DELETE:
             db.execute("DELETE FROM dns_records WHERE " + ' and '.join([ "%s=%%s" % k for k in args]) + " RETURNING id", values)
-        else:
+        elif self.action == RecordActions.ADD:
             db.execute("INSERT INTO dns_records (" + ', '.join(args) + ") VALUES (" + ','.join(['%s']*len(values)) + ") RETURNING id", values)
+        else:
+            raise NotImplemented("Update not implemented")
         if db.fetchone():
             return True
         return False
@@ -103,7 +112,7 @@ class Record(Task):
             if v is not None:
                 args.append((k,v))
         record = ' and '.join([ "%s=%s" % (k,v) for k,v in args])
-        if self.delete:
+        if self.action == RecordActions.DELETE:
             return "DELETE record %s" % record
         else:
             return "ADD record %s" % record
@@ -380,7 +389,7 @@ class DNSCommander(cmd.Cmd):
             key = key[:-len(self.current_domain.domain)-1]
         if not self.current_domain.exists_record(key, record_type, value, priority=priority, weight=weight, port=port):
             raise CommandException("Record does not exists!")
-        r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain, delete=True)
+        r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain, action=RecordActions.DELETE)
         self.todoqueue.append(r)
         self.update_serial = True
 
@@ -448,15 +457,21 @@ class DNSCommander(cmd.Cmd):
     def do_list(self, line):
         """List Domains/records"""
         if self.current_domain:
+            print("\033[1m{0:<40} {1:<6} {2:<5} {3:>4} {4}\033[0m".format("key", "ttl", "type", "priority", "value"))
             for row in self.current_domain.records():
                 print("{key:<40} {ttl:<6} {type:<5} {priority:>4} {value}".format(**row))
         else:
+            print("\033[1m{0:<40} {1:<10} {2:>12}\033[0m".format("name", "type", "notified serial"))
             for row in self.get_domains():
-                print("{0:<20} {1:>12}".format(*row))
+                print("{0:<40} {1:<10} {2:>12}".format(*row))
+        print("")
+
+    def do_ls(self, line):
+        return self.do_list(line)
 
     def get_domains(self):
-        db.execute("SELECT name, notified_serial FROM dns_zones ORDER BY name")
-        db.fetchall()
+        db.execute("SELECT name, type, notified_serial FROM dns_zones ORDER BY name")
+        return [[a, b, '%s' % c] for a,b,c in db.fetchall()]
 
 if __name__ == '__main__':
     DNSCommander().cmdloop()
