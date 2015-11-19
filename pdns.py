@@ -334,18 +334,18 @@ class DNSCommander(cmd.Cmd):
             if len(parts) == 7:
                 ttl = self.parse_ttl(parts[1])
                 priority = self.parse_priority(parts[3])
-                weight = self.parse_weight(parts[4])
-                port = self.parse_weight(parts[5])
-                value = parts[6]
+                #weight = self.parse_weight(parts[4])
+                #port = self.parse_weight(parts[5])
+                value = ' '.join(parts[4:7])
             elif len(parts) == 6:
                 priority = self.parse_priority(parts[2])
-                weight = self.parse_weight(parts[3])
-                port = self.parse_weight(parts[4])
-                value = parts[5]
+                #weight = self.parse_weight(parts[3])
+                #port = self.parse_weight(parts[4])
+                value = ' '.join(parts[3:6])
             elif len(parts) == 5:
-                weight = self.parse_weight(parts[2])
-                port = self.parse_weight(parts[3])
-                value = parts[4]
+                #weight = self.parse_weight(parts[2])
+                #port = self.parse_weight(parts[3])
+                value = ' '.join(parts[2:5])
             else:
                 raise CommandException("Cannot parse %s" % line)
         else:
@@ -455,10 +455,24 @@ class DNSCommander(cmd.Cmd):
             print(thing.show())
 
     def do_list(self, line):
-        """List Domains/records"""
+        """list [filter]
+        List Domains/records
+        """
+        keys = ["key", "type", "value"]
+        if line:
+            keywords = line.strip().split()
         if self.current_domain:
             print("\033[1m{0:<40} {1:<6} {2:<5} {3:>4} {4}\033[0m".format("key", "ttl", "type", "priority", "value"))
             for row in self.current_domain.records():
+                if keywords:
+                    found = False
+                    for x in keys:
+                        for k in keywords:
+                            if k in row[x]:
+                                found = True
+                                continue
+                    if not found:
+                        continue
                 print("{key:<40} {ttl:<6} {type:<5} {priority:>4} {value}".format(**row))
         else:
             print("\033[1m{0:<40} {1:<10} {2:>12}\033[0m".format("name", "type", "notified serial"))
