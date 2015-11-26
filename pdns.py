@@ -6,6 +6,7 @@ import sys
 import psycopg2
 from datetime import datetime
 import configparser
+from ipaddress import IPv6Address, IPv6Network, IPv4Address, IPv4Network, AddressValueError
 
 config = configparser.ConfigParser()
 config.read('/etc/pdnscmd.conf')
@@ -49,6 +50,8 @@ except configparser.NoOptionError:
         print("Cannot find postgres password")
         sys.exit(1)
 
+DEFAULT_TTL=360
+
 dbconn = conn = psycopg2.connect("dbname=%s user=%s password=%s host=%s" % (dbname, dbuser, password, dbhost))
 db = conn.cursor()
 
@@ -73,7 +76,7 @@ class RecordActions(object):
 
 
 class Record(Task):
-    def __init__(self, key, rtype, value, ttl, priority, weight, port, domain, action=RecordActions.ADD):
+    def __init__(self, key, rtype, value, domain, ttl=DEFAULT_TTL, priority=None, weight=None, port=None, action=RecordActions.ADD):
         if key == '@':
             self.key = domain.domain
         else:
@@ -123,6 +126,7 @@ class Domain(Task):
         self.domain = domain.rstrip('.')
         self._records = []
         self.zone_id = None
+        self.exists()
 
     def validate(self):
         if ' ' in self.domain or '.' not in self.domain:
@@ -160,6 +164,7 @@ class Domain(Task):
             key = self.domain
         else:
             key = '%s.%s' % (key, self.domain)
+        key = key.lower()
         query = "SELECT id from dns_records WHERE zone_id = %s and key = %s and type = %s and value = %s"
         args = [self.zone_id, key, rtype, value]
         if priority is not None:
@@ -182,9 +187,9 @@ class Domain(Task):
         db.execute("INSERT INTO dns_zones (name, rname, nameservers, last_check, notified_serial, type, master) VALUES (%s, %s, %s, NULL, 0, 'MASTER', %s) RETURNING id", (self.domain, ADMIN_CONTACT, [MASTER_DNS] + SLAVES, MASTER_DNS))
         res = db.fetchone()
         self.zone_id = int(res[0])
-        db.execute("INSERT INTO dns_records (key, type, ttl, value, priority, zone_id) VALUES (%s, 'SOA', 360, %s, %s, %s)" , (self.domain, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), '0', self.zone_id))
+        db.execute("INSERT INTO dns_records (key, type, ttl, value, priority, zone_id) VALUES (%s, 'SOA', %s, %s, %s, %s)" , (self.domain, DEFAULT_TTL, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), '0', self.zone_id))
         for i in [MASTER_DNS] + SLAVES:
-            db.execute("INSERT INTO dns_records (key, type, ttl, value, zone_id) VALUES (%s, 'NS', 360, %s, %s)" , (self.domain, i, self.zone_id))
+            db.execute("INSERT INTO dns_records (key, type, ttl, value, zone_id) VALUES (%s, 'NS', %s, %s, %s)" , (self.domain, DEFAULT_TTL, i, self.zone_id))
 
     def inc_serial(self):
         db.execute("SELECT id,value FROM dns_records WHERE type = 'SOA' and zone_id = %s", (self.zone_id,))
@@ -228,6 +233,44 @@ class DNSCommander(cmd.Cmd):
         if len(completions) > 20:
             return []
         return completions
+
+    def generate_reverse(self, ip, name, domain=None):
+        name = name.rstrip('.') + '.'
+        if ':' in ip:
+            try:
+                ipobject = IPv6Address(ip)
+            except AddressValueError as e:
+                raise CommandException("Invalid IPv6 address: %s" % e)
+            reverse = '.'.join(ipobject.exploded[::-1].replace(':', '')) + '.ip6.arpa'
+        else:
+            try:
+                ipobject = IPv4Address(ip)
+            except AddressValueError as e:
+                raise CommandException("Invalid IPv4 address: %s" % e)
+            reverse = '.'.join(ipobject.exploded.split('.')[::-1]) + '.in-addr.arpa'
+        if not domain:
+             for d in self.get_domains():
+                if reverse.endswith(d[0]):
+                    domain = Domain(d[0])
+                    break
+        if not domain:
+            raise CommandException("No such domain for %s" % reverse)
+
+        for r in  domain.records():
+            if r['key'] == reverse:
+                raise CommandException("Reverse record for key %s already exists with value %s" % (reverse, r['value']))
+
+        if not reverse.endswith(domain.domain):
+            raise CommandException("Wrong zone for this record!")
+
+        reverse = reverse[:len(reverse) - len(domain.domain) - 1]
+
+        if domain.exists_record(reverse, "PTR", name):
+            raise CommandException("Record already exists!")
+
+        r = Record(reverse, "PTR", name, domain=domain)
+        self.todoqueue.append(r)
+        self.update_serial = True
 
     def reset_prompt(self):
         self.update_serial = False
@@ -288,7 +331,7 @@ class DNSCommander(cmd.Cmd):
         raise CommandException("Invalid port %s" % t)
 
     def parse_record(self, line):
-        ttl = 360
+        ttl = DEFAULT_TTL
         priority = None
         weight = None
         port = None
@@ -377,6 +420,44 @@ class DNSCommander(cmd.Cmd):
         r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain)
         self.todoqueue.append(r)
         self.update_serial = True
+
+        # Generate reverse
+        if record_type in ['A', 'AAAA']:
+            if self.current_domain.domain not in key:
+                key = '%s.%s' % (key, self.current_domain.domain)
+            self.generate_reverse(value, key)
+            print("Generating reverse record also")
+
+    def do_addrev(self, line):
+        """
+        Add new reverse dns record to zone
+            addrev ip name
+        """
+        if not self.current_domain:
+            raise CommandException("Select domain first")
+        if len(line.split()) != 2:
+            raise CommandException("Invalid arguments")
+        ip, name = line.split(None,1)
+        self.generate_reverse(ip, name, self.current_domain)
+
+    def do_genrev(self, line):
+        """
+        Generate reverse records for name
+            genrev name
+        """
+        if not self.current_domain:
+            raise CommandException("Select domain first")
+        if not line:
+            raise CommandException("Name required!")
+        for record in self.current_domain.records():
+            if record['key'] != line:
+                continue
+            if record['type'] in ['A', 'AAAA']:
+                print("self.generate_reverse(%s, %s)" % (record['value'], record['key']))
+                try:
+                    self.generate_reverse(record['value'], record['key'])
+                except CommandException as e:
+                    print("Not doing reverse for %s: %s" % (record['value'], e))
 
     def do_delete(self, line):
         """Delete dns record:
