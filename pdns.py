@@ -461,6 +461,8 @@ class DNSCommander(cmd.Cmd):
         keys = ["key", "type", "value"]
         if line:
             keywords = line.strip().split()
+        else:
+            keywords = []
         if self.current_domain:
             print("\033[1m{0:<40} {1:<6} {2:<5} {3:>4} {4}\033[0m".format("key", "ttl", "type", "priority", "value"))
             for row in self.current_domain.records():
