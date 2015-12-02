@@ -279,11 +279,15 @@ class DNSCommander(cmd.Cmd):
 
     def do_commit(self, line):
         """Commit changes"""
+        domains = []
         for t in self.todoqueue:
             t.execute()
+            if t.domain not in domains:
+                domains.append(t.domain)
         self.todoqueue = []
         if self.update_serial:
-            self.current_domain.inc_serial()
+            for d in domains:
+                d.inc_serial()
         dbconn.commit()
         #self.reset_prompt()
 
@@ -438,6 +442,7 @@ class DNSCommander(cmd.Cmd):
         if len(line.split()) != 2:
             raise CommandException("Invalid arguments")
         ip, name = line.split(None,1)
+        self.update_serial = True
         self.generate_reverse(ip, name, self.current_domain)
 
     def do_genrev(self, line):
@@ -453,9 +458,9 @@ class DNSCommander(cmd.Cmd):
             if record['key'] != line:
                 continue
             if record['type'] in ['A', 'AAAA']:
-                print("self.generate_reverse(%s, %s)" % (record['value'], record['key']))
                 try:
                     self.generate_reverse(record['value'], record['key'])
+                    self.update_serial = True
                 except CommandException as e:
                     print("Not doing reverse for %s: %s" % (record['value'], e))
 
