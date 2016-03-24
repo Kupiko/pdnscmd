@@ -7,6 +7,7 @@ import psycopg2
 from datetime import datetime
 import configparser
 from ipaddress import IPv6Address, IPv6Network, IPv4Address, IPv4Network, AddressValueError
+import subprocess
 
 config = configparser.ConfigParser()
 config.read('/etc/pdnscmd.conf')
@@ -54,6 +55,10 @@ DEFAULT_TTL=360
 
 dbconn = conn = psycopg2.connect("dbname=%s user=%s password=%s host=%s" % (dbname, dbuser, password, dbhost))
 db = conn.cursor()
+
+def notify_domain(domain):
+    p = subprocess.call(['pdns_control', 'notify', domain], timeout=5)
+
 
 class CommandException(Exception):
     pass
@@ -127,6 +132,7 @@ class Domain(Task):
         self._records = []
         self.zone_id = None
         self.exists()
+        self.to_delete = False
 
     def validate(self):
         if ' ' in self.domain or '.' not in self.domain:
@@ -145,6 +151,8 @@ class Domain(Task):
     def show(self):
         if not self.exists():
             return "ADD domain %s" % self.domain
+        if self.to_delete:
+            return "DELETE domain %s" % self.domain
         return ""
 
     def clear_records(self):
@@ -167,9 +175,9 @@ class Domain(Task):
         key = key.lower()
         query = "SELECT id from dns_records WHERE zone_id = %s and key = %s and type = %s and value = %s"
         args = [self.zone_id, key, rtype, value]
+        #print(query % args)
         if priority is not None:
-            query += " and priority = %s"
-            args.append(priority)
+            args[-1] = "%s %s" % (priority, args[-1])
         if weight is not None:
             query += " and weight = %s"
             args.append(weight)
@@ -202,8 +210,17 @@ class Domain(Task):
         soa = "%s %s %s %s %s %s %s" % tuple(cur.split()[:2] + [serial] + cur.split()[3:])
         db.execute("UPDATE dns_records SET value = %s WHERE id = %s", (soa, res[0]))
 
+    def delete(self):
+        if not self.exists():
+            return
+        db.execute("DELETE from dns_records where zone_id = %s", (self.zone_id,))
+        db.execute("DELETE from dns_zones WHERE name = %s", (self.domain,))
+
     def execute(self):
-        self.create()
+        if self.to_delete:
+            self.delete()
+        else:
+            self.create()
 
 
 class DNSCommander(cmd.Cmd):
@@ -290,6 +307,9 @@ class DNSCommander(cmd.Cmd):
                 d.inc_serial()
         dbconn.commit()
         #self.reset_prompt()
+        if self.update_serial:
+            for d in domains:
+                notify_domain(d.domain)
 
 
     def do_revert(self, line):
@@ -511,6 +531,23 @@ class DNSCommander(cmd.Cmd):
             diff = len(full_text) - len(text)
             return list(set([x['value'][diff:] for x in records if x['key'] == key and x['type'] == key_type and x['value'].startswith(text)]))
         return []
+
+    def do_deletedomain(self, line):
+        if self.current_domain:
+            print("Get out of domain context first")
+            return False
+        if self.todoqueue:
+            print("Commit or revert first")
+            return False
+        d = Domain(line)
+        if not d.exists():
+            print("Domain %s does not exist" % domain)
+            return False
+        d.to_delete = True
+        self.todoqueue.append(d)
+
+    def complete_deletedomain(self, *args, **kwargs):
+        return self.complete_domain(*args, **kwargs)
 
     def do_EOF(self, line):
         if self.todoqueue:
