@@ -52,6 +52,7 @@ except configparser.NoOptionError:
         sys.exit(1)
 
 DEFAULT_TTL=360
+DEBUG = False
 
 dbconn = conn = psycopg2.connect("dbname=%s user=%s password=%s host=%s" % (dbname, dbuser, password, dbhost))
 db = conn.cursor()
@@ -82,7 +83,7 @@ class RecordActions(object):
 
 class Record(Task):
     def __init__(self, key, rtype, value, domain, ttl=DEFAULT_TTL, priority=None, weight=None, port=None, action=RecordActions.ADD):
-        if key == '@':
+        if key == '@' or key == '':
             self.key = domain.domain
         else:
             self.key = "%s.%s" % (key, domain.domain)
@@ -184,6 +185,8 @@ class Domain(Task):
         if port is not None:
             query += " and port = %s"
             args.append(port)
+        if DEBUG:
+            print(query)
         db.execute(query, args)
         if db.fetchone() is None:
             return False
@@ -364,7 +367,7 @@ class DNSCommander(cmd.Cmd):
             raise CommandException("Cannot parse %s" % line)
         key = parts[0].strip()
         record_type = parts[1].strip()
-        if parts[1] in ['TXT','A','AAAA','NS', 'CNAME']:
+        if parts[1] in ['TXT','A','AAAA','NS', 'CNAME', 'SPF']:
             parts = line.split(None, 3)
             if len(parts) == 4:
                 ttl = self.parse_ttl(parts[2])
@@ -492,9 +495,15 @@ class DNSCommander(cmd.Cmd):
         key, record_type, value, ttl, priority, weight, port = self.parse_record(line)
         key = key.rstrip(".")
         if key.endswith(self.current_domain.domain):
-            key = key[:-len(self.current_domain.domain)-1]
+            key = key[:-len(self.current_domain.domain)-1].strip()
+        if weight:
+            weight = int(weight)
         if not self.current_domain.exists_record(key, record_type, value, priority=priority, weight=weight, port=port):
-            raise CommandException("Record does not exists!")
+            print("key: '%s' type: '%s' value: '%s' priority: '%s' weight '%s' port '%s'" % (key, record_type, value, priority, weight, port))
+            if not self.current_domain.exists_record(key, record_type, "%s %s" % (priority, value), priority=None, weight=weight, port=port):
+                raise CommandException("Record does not exists!")
+            value = "%s %s" % (priority, value)
+            priority = None
         r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain, action=RecordActions.DELETE)
         self.todoqueue.append(r)
         self.update_serial = True
@@ -607,6 +616,10 @@ class DNSCommander(cmd.Cmd):
 
     def do_ls(self, line):
         return self.do_list(line)
+
+    def do_toggle_debug(self, line):
+        global DEBUG
+        DEBUG = not DEBUG
 
     def get_domains(self):
         db.execute("SELECT name, type, notified_serial FROM dns_zones ORDER BY name")
