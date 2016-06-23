@@ -292,6 +292,38 @@ class DNSCommander(cmd.Cmd):
         self.todoqueue.append(r)
         self.update_serial = True
 
+    def delete_reverse(self, ip, name, domain=None):
+        name = name.rstrip('.') + '.'
+        if ':' in ip:
+            try:
+                ipobject = IPv6Address(ip)
+            except AddressValueError as e:
+                raise CommandException("Invalid IPv6 address: %s" % e)
+            reverse = '.'.join(ipobject.exploded[::-1].replace(':', '')) + '.ip6.arpa'
+        else:
+            try:
+                ipobject = IPv4Address(ip)
+            except AddressValueError as e:
+                raise CommandException("Invalid IPv4 address: %s" % e)
+            reverse = '.'.join(ipobject.exploded.split('.')[::-1]) + '.in-addr.arpa'
+        if not domain:
+             for d in self.get_domains():
+                if reverse.endswith(d[0]):
+                    domain = Domain(d[0])
+                    break
+        if not domain:
+            raise CommandException("No such domain for %s" % reverse)
+
+        for r in  domain.records():
+            if r['key'] == reverse and r['value'].rstrip('.') == name.rstrip('.'):
+
+                print("Removing reverse record %s PTR %s" % (r['key'], r['value']))
+                r = Record(reverse[:len(reverse) - len(domain.domain) - 1], "PTR", r['value'], domain=domain, action=RecordActions.DELETE)
+                self.todoqueue.append(r)
+                self.update_serial = True
+                return
+
+
     def reset_prompt(self):
         self.update_serial = False
         self.current_domain = None
@@ -507,6 +539,11 @@ class DNSCommander(cmd.Cmd):
         r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain, action=RecordActions.DELETE)
         self.todoqueue.append(r)
         self.update_serial = True
+
+        if record_type in ['A', 'AAAA']:
+            if self.current_domain.domain not in key:
+                key = '%s.%s' % (key, self.current_domain.domain)
+            self.delete_reverse(value, key)
 
     def complete_delete(self, text, line, beginidx, endidx):
         records = self.current_domain.records()
