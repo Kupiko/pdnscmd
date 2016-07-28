@@ -334,7 +334,7 @@ class DNSCommander(cmd.Cmd):
         domains = []
         for t in self.todoqueue:
             t.execute()
-            if t.domain not in domains:
+            if t.domain not in domains and isinstance(t.domain, Domain):
                 domains.append(t.domain)
         self.todoqueue = []
         if self.update_serial:
