@@ -8,6 +8,12 @@ from datetime import datetime
 import configparser
 from ipaddress import IPv6Address, IPv6Network, IPv4Address, IPv4Network, AddressValueError
 import subprocess
+import requests
+
+import logging
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+logging.basicConfig()
 
 config = configparser.ConfigParser()
 config.read('/etc/pdnscmd.conf')
@@ -24,7 +30,6 @@ try:
     ADMIN_CONTACT = config.get('global', 'admin_contact')
 except configparser.NoOptionError:
     ADMIN_CONTACT = 'hostmaster.example.com'
-
 try:
     dbname = config.get('postgres', 'database')
 except configparser.NoOptionError:
@@ -82,7 +87,7 @@ class RecordActions(object):
 
 
 class Record(Task):
-    def __init__(self, key, rtype, value, domain, ttl=DEFAULT_TTL, priority=None, weight=None, port=None, action=RecordActions.ADD):
+    def __init__(self, key, rtype, value, domain, ttl=None, priority=None, action=RecordActions.ADD):
         if key == '@' or key == '':
             self.key = domain.domain
         else:
@@ -90,25 +95,25 @@ class Record(Task):
         self.rtype = rtype
         self.value = value
         self.ttl = ttl
+        if ttl is None and action == RecordActions.ADD:
+            self.ttl = DEFAULT_TTL
         self.priority = priority
-        self.weight = weight
-        self.port = port
         self.domain = domain
         self.action = action
 
     def execute(self):
-        args = ['key','type', 'value', 'zone_id']
+        args = ['name', 'type', 'content', 'domain_id']
         values = [self.key, self.rtype, self.value, self.domain.zone_id]
         self.domain.clear_records()
-        for k, v in (('ttl', self.ttl), ('priority', self.priority), ('weight', self.weight), ('port', self.port)):
+        for k, v in (('ttl', self.ttl), ('prio', self.priority),):
             if v is not None:
                 args.append(k)
                 values.append(v)
 
         if self.action == RecordActions.DELETE:
-            db.execute("DELETE FROM dns_records WHERE " + ' and '.join([ "%s=%%s" % k for k in args]) + " RETURNING id", values)
+            db.execute("DELETE FROM records WHERE " + ' and '.join(["%s=%%s" % k for k in args]) + " RETURNING id", values)
         elif self.action == RecordActions.ADD:
-            db.execute("INSERT INTO dns_records (" + ', '.join(args) + ") VALUES (" + ','.join(['%s']*len(values)) + ") RETURNING id", values)
+            db.execute("INSERT INTO records (" + ', '.join(args) + ") VALUES (" + ','.join(['%s']*len(values)) + ") RETURNING id", values)
         else:
             raise NotImplemented("Update not implemented")
         if db.fetchone():
@@ -116,8 +121,8 @@ class Record(Task):
         return False
 
     def show(self):
-        args = [('key', self.key), ('type', self.rtype), ('value', self.value)]
-        for k, v in (('ttl', self.ttl), ('priority', self.priority), ('weight', self.weight), ('port', self.port)):
+        args = [('name', self.key), ('type', self.rtype), ('content', self.value)]
+        for k, v in (('ttl', self.ttl), ('prio', self.priority)):
             if v is not None:
                 args.append((k,v))
         record = ' and '.join([ "%s=%s" % (k,v) for k,v in args])
@@ -141,7 +146,7 @@ class Domain(Task):
         return True
 
     def exists(self):
-        db.execute("SELECT name, id from dns_zones where name = %s", (self.domain,))
+        db.execute("SELECT name, id from domains where name = %s", (self.domain,))
         res = db.fetchone()
         if res:
             self.zone_id = int(res[1])
@@ -160,31 +165,26 @@ class Domain(Task):
         self._records = []
 
     def update_records(self):
-        db.execute("SELECT key, type, ttl, coalesce(priority::text,''), value FROM dns_records WHERE zone_id = %s ORDER BY key, type, value", (self.zone_id,))
-        self._records = [{'key': x[0], 'type': x[1], 'ttl': x[2], 'priority': x[3], 'value': x[4]} for x in db.fetchall()]
+        db.execute("SELECT name, type, ttl, coalesce(prio::text,''), content FROM records WHERE domain_id = %s ORDER BY name, type, content", (self.zone_id,))
+        self._records = [{'key': x[0], 'type': x[1] or '-', 'ttl': x[2] or '-', 'priority': x[3] or '-', 'value': x[4] or '-'} for x in db.fetchall()]
 
     def records(self):
         if not self._records:
             self.update_records()
         return self._records
 
-    def exists_record(self, key, rtype, value, priority=None, weight=None, port=None):
+    def exists_record(self, key, rtype, value, priority=None):
+        key = key.strip('.')
         if key == '@':
             key = self.domain
-        else:
+        elif not key.endswith(self.domain):
             key = '%s.%s' % (key, self.domain)
         key = key.lower()
-        query = "SELECT id from dns_records WHERE zone_id = %s and key = %s and type = %s and value = %s"
+        query = "SELECT id from records WHERE domain_id = %s and name = %s and type = %s and content = %s"
         args = [self.zone_id, key, rtype, value]
-        #print(query % args)
         if priority is not None:
-            args[-1] = "%s %s" % (priority, args[-1])
-        if weight is not None:
-            query += " and weight = %s"
-            args.append(weight)
-        if port is not None:
-            query += " and port = %s"
-            args.append(port)
+            args.append("%s" % (priority,))
+            query = query + " and prio = %s"
         if DEBUG:
             print(query)
         db.execute(query, args)
@@ -192,18 +192,48 @@ class Domain(Task):
             return False
         return True
 
+    """
+         Column      |          Type          |                      Modifiers                       | Storage  | Stats target | Description
+    -----------------+------------------------+------------------------------------------------------+----------+--------------+-------------
+     id              | integer                | not null default nextval('domains_id_seq'::regclass) | plain    |              |
+     name            | character varying(255) | not null                                             | extended |              |
+     master          | character varying(128) | default NULL::character varying                      | extended |              |
+     last_check      | integer                |                                                      | plain    |              |
+     type            | character varying(6)   | not null                                             | extended |              |
+     notified_serial | integer                |                                                      | plain    |              |
+     account         | character varying(40)  | default NULL::character varying                      | extended |              |
+    """
+
+    """
+
+        Column    |           Type           |                      Modifiers                       | Storage  | Stats target | Description
+    --------------+--------------------------+------------------------------------------------------+----------+--------------+-------------
+      id          | integer                  | not null default nextval('records_id_seq'::regclass) | plain    |              |
+      domain_id   | integer                  |                                                      | plain    |              |
+      name        | character varying(255)   | default NULL::character varying                      | extended |              |
+      type        | character varying(10)    | default NULL::character varying                      | extended |              |
+      content     | character varying(65535) | default NULL::character varying                      | extended |              |
+      ttl         | integer                  |                                                      | plain    |              |
+      prio        | integer                  |                                                      | plain    |              |
+      change_date | integer                  |                                                      | plain    |              |
+      disabled    | boolean                  | default false                                        | plain    |              |
+      ordername   | character varying(255)   |                                                      | extended |              |
+      auth        | boolean                  | default true                                         | plain    |              |
+
+    """
+
     def create(self):
         if self.exists():
             return
-        db.execute("INSERT INTO dns_zones (name, rname, nameservers, last_check, notified_serial, type, master) VALUES (%s, %s, %s, NULL, 0, 'MASTER', %s) RETURNING id", (self.domain, ADMIN_CONTACT, [MASTER_DNS] + SLAVES, MASTER_DNS))
+        db.execute("INSERT INTO domains (name, last_check, notified_serial, type, master, account) VALUES (%s, NULL, 0, 'MASTER', %s, '') RETURNING id", (self.domain, MASTER_DNS))
         res = db.fetchone()
         self.zone_id = int(res[0])
-        db.execute("INSERT INTO dns_records (key, type, ttl, value, priority, zone_id) VALUES (%s, 'SOA', %s, %s, %s, %s)" , (self.domain, DEFAULT_TTL, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), '0', self.zone_id))
+        db.execute("INSERT INTO records (name, type, ttl, content, prio, domain_id) VALUES (%s, 'SOA', %s, %s, %s, %s)" , (self.domain, DEFAULT_TTL, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), '0', self.zone_id))
         for i in [MASTER_DNS] + SLAVES:
-            db.execute("INSERT INTO dns_records (key, type, ttl, value, zone_id) VALUES (%s, 'NS', %s, %s, %s)" , (self.domain, DEFAULT_TTL, i, self.zone_id))
+            db.execute("INSERT INTO records (name, type, ttl, content, prio, domain_id) VALUES (%s, 'NS', %s, %s, 0, %s)" , (self.domain, DEFAULT_TTL, i, self.zone_id))
 
     def inc_serial(self):
-        db.execute("SELECT id,value FROM dns_records WHERE type = 'SOA' and zone_id = %s", (self.zone_id,))
+        db.execute("SELECT id, content FROM records WHERE type = 'SOA' and domain_id = %s", (self.zone_id,))
         res = db.fetchone()
         cur = res[1]
         serial = int(cur.split()[2])+1
@@ -211,13 +241,13 @@ class Domain(Task):
         if alt > serial:
             serial = alt
         soa = "%s %s %s %s %s %s %s" % tuple(cur.split()[:2] + [serial] + cur.split()[3:])
-        db.execute("UPDATE dns_records SET value = %s WHERE id = %s", (soa, res[0]))
+        db.execute("UPDATE records SET content = %s WHERE id = %s", (soa, res[0]))
 
     def delete(self):
         if not self.exists():
             return
-        db.execute("DELETE from dns_records where zone_id = %s", (self.zone_id,))
-        db.execute("DELETE from dns_zones WHERE name = %s", (self.domain,))
+        db.execute("DELETE from records where domain_id = %s", (self.zone_id,))
+        db.execute("DELETE from domains WHERE name = %s", (self.domain,))
 
     def execute(self):
         if self.to_delete:
@@ -246,7 +276,7 @@ class DNSCommander(cmd.Cmd):
 
     def complete_domain(self, line, text, begidx, endidx):
         completions = []
-        db.execute("SELECT name from dns_zones WHERE name LIKE %s", ('%s%%' % line.strip(),))
+        db.execute("SELECT name from domains WHERE name LIKE %s", ('%s%%' % line.strip(),))
         for res in db.fetchall():
             if res[0].startswith(line.strip()):
                 completions.append(res[0])
@@ -318,7 +348,7 @@ class DNSCommander(cmd.Cmd):
             if r['key'] == reverse and r['value'].rstrip('.') == name.rstrip('.'):
 
                 print("Removing reverse record %s PTR %s" % (r['key'], r['value']))
-                r = Record(reverse[:len(reverse) - len(domain.domain) - 1], "PTR", r['value'], domain=domain, action=RecordActions.DELETE)
+                r = Record(reverse[:len(reverse) - len(domain.domain) - 1], "PTR", r['value'], ttl=r['ttl'], domain=domain, action=RecordActions.DELETE)
                 self.todoqueue.append(r)
                 self.update_serial = True
                 return
@@ -390,10 +420,8 @@ class DNSCommander(cmd.Cmd):
         raise CommandException("Invalid port %s" % t)
 
     def parse_record(self, line):
-        ttl = DEFAULT_TTL
+        ttl = None
         priority = None
-        weight = None
-        port = None
         parts = line.split(None, 6)
         if len(parts) < 3:
             raise CommandException("Cannot parse %s" % line)
@@ -408,7 +436,7 @@ class DNSCommander(cmd.Cmd):
                 value = parts[2]
             else:
                 raise CommandException("Cannot parse %s" % line)
-        elif parts[1] in ['MX']:
+        elif parts[1] in ['MX', 'SRV', 'TLSA']:
             parts = line.split(None, 4)
             if len(parts) == 5:
                 ttl = self.parse_ttl(parts[2])
@@ -430,32 +458,12 @@ class DNSCommander(cmd.Cmd):
                 raise CommandException("Cannot parse %s" % line)
             if not value.endswith('.'):
                 value = "%s." % value
-        elif parts[1] in ['SRV', 'TLSA']:
-            if len(parts) > 3 and parts[1] == 'IN':
-                parts = parts[0] + parts[2:]
-            if len(parts) == 7:
-                ttl = self.parse_ttl(parts[1])
-                priority = self.parse_priority(parts[3])
-                #weight = self.parse_weight(parts[4])
-                #port = self.parse_weight(parts[5])
-                value = ' '.join(parts[4:7])
-            elif len(parts) == 6:
-                priority = self.parse_priority(parts[2])
-                #weight = self.parse_weight(parts[3])
-                #port = self.parse_weight(parts[4])
-                value = ' '.join(parts[3:6])
-            elif len(parts) == 5:
-                #weight = self.parse_weight(parts[2])
-                #port = self.parse_weight(parts[3])
-                value = ' '.join(parts[2:5])
-            else:
-                raise CommandException("Cannot parse %s" % line)
         else:
             raise CommandException("Cannot parse %s" % line)
 
         if not self.current_domain:
             raise CommandException("Select domain first!")
-        return (key, record_type, value, ttl, priority, weight, port)
+        return (key, record_type, value, ttl, priority)
 
     def do_add(self, line):
         """
@@ -469,14 +477,14 @@ class DNSCommander(cmd.Cmd):
         priority is used with MX and SRV records
         weight and port are SRV specific values
         """
-        key, record_type, value, ttl, priority, weight, port = self.parse_record(line)
+        key, record_type, value, ttl, priority = self.parse_record(line)
         key = key.rstrip(".")
         if key.endswith(self.current_domain.domain):
             key = key[:-len(self.current_domain.domain)-1]
-        if self.current_domain.exists_record(key, record_type, value, priority=priority, weight=weight, port=port):
+        if self.current_domain.exists_record(key, record_type, value, priority=priority):
             raise CommandException("Record already exists!")
 
-        r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain)
+        r = Record(key, record_type, value, ttl=ttl, priority=priority, domain=self.current_domain)
         self.todoqueue.append(r)
         self.update_serial = True
 
@@ -524,19 +532,19 @@ class DNSCommander(cmd.Cmd):
 
             delete key type [ttl] [priority] [weight] [port] value
         """
-        key, record_type, value, ttl, priority, weight, port = self.parse_record(line)
+        key, record_type, value, ttl, priority = self.parse_record(line)
         key = key.rstrip(".")
         if key.endswith(self.current_domain.domain):
             key = key[:-len(self.current_domain.domain)-1].strip()
-        if weight:
-            weight = int(weight)
-        if not self.current_domain.exists_record(key, record_type, value, priority=priority, weight=weight, port=port):
-            print("key: '%s' type: '%s' value: '%s' priority: '%s' weight '%s' port '%s'" % (key, record_type, value, priority, weight, port))
-            if not self.current_domain.exists_record(key, record_type, "%s %s" % (priority, value), priority=None, weight=weight, port=port):
+        if key == '':
+            key = '@'
+        if not self.current_domain.exists_record(key, record_type, value, priority=priority):
+            print("key: '%s' type: '%s' value: '%s' priority: '%s'" % (key, record_type, value, priority))
+            if not self.current_domain.exists_record(key, record_type, "%s %s" % (priority, value), priority=None):
                 raise CommandException("Record does not exists!")
             value = "%s %s" % (priority, value)
             priority = None
-        r = Record(key, record_type, value, ttl=ttl, priority=priority, weight=weight, port=port, domain=self.current_domain, action=RecordActions.DELETE)
+        r = Record(key, record_type, value, ttl=ttl, priority=priority, domain=self.current_domain, action=RecordActions.DELETE)
         self.todoqueue.append(r)
         self.update_serial = True
 
@@ -554,6 +562,8 @@ class DNSCommander(cmd.Cmd):
             else:
                 full_text = text
             diff = len(full_text) - len(text)
+            if full_text == '@':
+                return [self.current_domain.domain]
             record_set = [y['key'][diff:] for y in records if y['key'].startswith(full_text)]
             # Make list unique
             return list(set(record_set))
@@ -659,7 +669,7 @@ class DNSCommander(cmd.Cmd):
         DEBUG = not DEBUG
 
     def get_domains(self):
-        db.execute("SELECT name, type, notified_serial FROM dns_zones ORDER BY name")
+        db.execute("SELECT name, type, notified_serial FROM domains ORDER BY name")
         return [[a, b, '%s' % c] for a,b,c in db.fetchall()]
 
 if __name__ == '__main__':
