@@ -225,7 +225,7 @@ class Domain(Task):
     def create(self):
         if self.exists():
             return
-        db.execute("INSERT INTO domains (name, last_check, notified_serial, type, master, account) VALUES (%s, NULL, NULL, 0, 'MASTER', %s, '') RETURNING id", (self.domain, MASTER_DNS))
+        db.execute("INSERT INTO domains (name, last_check, notified_serial, type, master, account) VALUES (%s, NULL, 0, 'MASTER', %s, '') RETURNING id", (self.domain, MASTER_DNS))
         res = db.fetchone()
         self.zone_id = int(res[0])
         db.execute("INSERT INTO records (name, type, ttl, content, prio, domain_id) VALUES (%s, 'SOA', %s, %s, %s, %s)" , (self.domain, DEFAULT_TTL, '%s %s %s01 3600 900 1209600 86400' % (MASTER_DNS, ADMIN_CONTACT, datetime.now().strftime("%Y%m%d")), '0', self.zone_id))
@@ -404,7 +404,7 @@ class DNSCommander(cmd.Cmd):
     def parse_priority(self, t):
         try:
             t = int(t)
-            if t > 0 and t < 65535:
+            if t >= 0 and t <= 65535:
                 return t
         except ValueError:
             pass
@@ -436,7 +436,7 @@ class DNSCommander(cmd.Cmd):
                 value = parts[2]
             else:
                 raise CommandException("Cannot parse %s" % line)
-        elif parts[1] in ['MX', 'SRV', 'TLSA']:
+        elif parts[1] in ['MX', 'SRV', 'TLSA', 'CAA']:
             parts = line.split(None, 4)
             if len(parts) == 5:
                 ttl = self.parse_ttl(parts[2])
@@ -463,6 +463,16 @@ class DNSCommander(cmd.Cmd):
 
         if not self.current_domain:
             raise CommandException("Select domain first!")
+        if record_type == "A":
+            try:
+                ipobject = IPv4Address(value)
+            except AddressValueError as e:
+                raise CommandException("Invalid IPv4 address: %s" % e)
+        if record_type == "AAAA":
+            try:
+                ipobject = IPv6Address(value)
+            except AddressValueError as e:
+                raise CommandException("Invalid IPv6 address: %s" % e)
         return (key, record_type, value, ttl, priority)
 
     def do_add(self, line):
