@@ -49,10 +49,10 @@ try:
     password = config.get('postgres', 'password')
 except configparser.NoOptionError:
     password = None
-    f = open("/etc/powerdns/pdns.d/pdns.local.gpgsql",'r')
+    f = open("/etc/powerdns/pdns.d/pdns.local.gpgsql", 'r')
     for line in f.readlines():
         if line.startswith('gpgsql-password='):
-            password = line.split('=',1)[1]
+            password = line.split('=', 1)[1]
     f.close()
 
     if not password:
@@ -407,7 +407,6 @@ class DNSCommander(cmd.Cmd):
             for d in domains:
                 notify_domain(d.domain)
 
-
     def do_revert(self, line):
         """Revert changes"""
         self.todoqueue = []
@@ -456,9 +455,9 @@ class DNSCommander(cmd.Cmd):
         parts = line.split(None, 6)
         if len(parts) < 3:
             raise CommandException("Cannot parse %s" % line)
-        key = parts[0].strip()
-        record_type = parts[1].strip()
-        if parts[1] in ['TXT','A','AAAA','NS', 'CNAME', 'SPF']:
+        key = parts[0].strip().lower()
+        record_type = parts[1].strip().upper()
+        if record_type in ['TXT', 'A', 'AAAA', 'NS', 'CNAME', 'SPF']:
             parts = line.split(None, 3)
             if len(parts) == 4:
                 ttl = self.parse_ttl(parts[2])
@@ -467,7 +466,7 @@ class DNSCommander(cmd.Cmd):
                 value = parts[2]
             else:
                 raise CommandException("Cannot parse %s" % line)
-        elif parts[1] in ['MX', 'SRV', 'TLSA', 'CAA']:
+        elif record_type in ['MX', 'SRV', 'TLSA', 'CAA']:
             parts = line.split(None, 4)
             if len(parts) == 5:
                 ttl = self.parse_ttl(parts[2])
@@ -478,7 +477,7 @@ class DNSCommander(cmd.Cmd):
                 value = parts[3]
             else:
                 raise CommandException("Cannot parse %s" % line)
-        elif parts[1] in ['PTR']:
+        elif record_type in ['PTR']:
             parts = line.split(None, 3)
             if len(parts) == 4:
                 ttl = self.parse_ttl(parts[2])
@@ -504,7 +503,7 @@ class DNSCommander(cmd.Cmd):
                 ipobject = IPv6Address(value)
             except AddressValueError as e:
                 raise CommandException("Invalid IPv6 address: %s" % e)
-        return (key, record_type, value, ttl, priority)
+        return (key, record_type, value.lower(), ttl, priority)
 
     def do_add(self, line):
         """
@@ -545,7 +544,7 @@ class DNSCommander(cmd.Cmd):
             raise CommandException("Select domain first")
         if len(line.split()) != 2:
             raise CommandException("Invalid arguments")
-        ip, name = line.split(None,1)
+        ip, name = line.split(None, 1)
         self.update_serial = True
         self.generate_reverse(ip, name, self.current_domain)
 
@@ -573,8 +572,11 @@ class DNSCommander(cmd.Cmd):
 
             delete key type [ttl] [priority] [weight] [port] value
         """
+        if len(line.split()) < 3:
+            print("Use deleteall to delete multiple records")
+            return
         key, record_type, value, ttl, priority = self.parse_record(line)
-        key = key.rstrip(".")
+        key = key.rstrip(".").lower()
         if key.endswith(self.current_domain.domain):
             key = key[:-len(self.current_domain.domain)-1].strip()
         if key == '':
