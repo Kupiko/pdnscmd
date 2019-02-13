@@ -3,6 +3,7 @@
 
 import cmd
 import sys
+import os
 import psycopg2
 from datetime import datetime
 import configparser
@@ -15,8 +16,10 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 logging.basicConfig()
 
+CONFIG_FILE = os.environ.get("CONFIG_FILE", '/etc/pdnscmd.conf')
+
 config = configparser.ConfigParser()
-config.read('/etc/pdnscmd.conf')
+config.read(CONFIG_FILE)
 
 try:
     MASTER_DNS = config.get('global', 'master_dns')
@@ -164,6 +167,15 @@ class Domain(Task):
     def clear_records(self):
         self._records = []
 
+    def _format_record(self, row):
+        return {
+            'key': row[0],
+            'type': row[1] or '-',
+            'ttl': row[2] or '-',
+            'priority': row[3] or '-',
+            'value': row[4] or '-'
+        }
+
     def update_records(self):
         db.execute("SELECT name, type, ttl, coalesce(prio::text,''), content FROM records WHERE domain_id = %s ORDER BY name, type, content", (self.zone_id,))
         self._records = [{'key': x[0], 'type': x[1] or '-', 'ttl': x[2] or '-', 'priority': x[3] or '-', 'value': x[4] or '-'} for x in db.fetchall()]
@@ -173,13 +185,16 @@ class Domain(Task):
             self.update_records()
         return self._records
 
-    def exists_record(self, key, rtype, value, priority=None):
+    def fqdn(self, key):
         key = key.strip('.')
         if key == '@':
             key = self.domain
         elif not key.endswith(self.domain):
             key = '%s.%s' % (key, self.domain)
-        key = key.lower()
+        return key.lower()
+
+    def exists_record(self, key, rtype, value, priority=None):
+        key = self.fqdn(key)
         query = "SELECT id from records WHERE domain_id = %s and name = %s and type = %s and content = %s"
         args = [self.zone_id, key, rtype, value]
         if priority is not None:
@@ -191,6 +206,22 @@ class Domain(Task):
         if db.fetchone() is None:
             return False
         return True
+
+    def get_records(self, key, rtype=None, value=None):
+        key = self.fqdn(key)
+        args = [self.zone_id, key]
+        query = "SELECT name, type, ttl, coalesce(prio::text,''), content FROM records " \
+                "WHERE domain_id = %s and name = %s"
+        if rtype is not None:
+            query += " type = %s"
+            args.append(rtype)
+        if value is not None:
+            query += " content = %s"
+            args.append(value)
+        if DEBUG:
+            print(query)
+        db.execute(query, args)
+        return [self._format_record(x) for x in db.fetchall()]
 
     """
          Column      |          Type          |                      Modifiers                       | Storage  | Stats target | Description
@@ -562,6 +593,41 @@ class DNSCommander(cmd.Cmd):
             if self.current_domain.domain not in key:
                 key = '%s.%s' % (key, self.current_domain.domain)
             self.delete_reverse(value, key)
+
+    def do_deleteall(self, line):
+        """Delete all dns records matching key:
+
+           deleteall key [type]
+        """
+        type = None
+        if len(line.split()) == 1:
+            key = line.strip()
+        else:
+            key, type = line.split(None, 1)
+            type = type.upper()
+        key = key.rstrip(".").lower()
+        if key.endswith(self.current_domain.domain):
+            key = key[:-len(self.current_domain.domain) - 1].strip()
+        if key == '' or key == '@':
+            raise CommandException("Removing all from root level is not allowed.")
+
+        for row in self.current_domain.get_records(key=key, rtype=type):
+            if row["type"].upper() in ["SOA"]:
+                print("Skipping SOA record")
+                continue
+            row_key = row['key']
+            if row_key.endswith(self.current_domain.domain):
+                row_key = row_key[:-len(self.current_domain.domain) - 1].strip()
+            r = Record(row_key, row["type"], row["value"], ttl=row["ttl"], priority=None if row["priority"] == '-' else row["priority"],
+                       domain=self.current_domain, action=RecordActions.DELETE)
+            self.todoqueue.append(r)
+            if row["type"] in ['A', 'AAAA']:
+                if self.current_domain.domain not in row["key"]:
+                    rev_key = '%s.%s' % (row["key"], self.current_domain.domain)
+                else:
+                    rev_key = row["key"]
+                self.delete_reverse(row["value"], rev_key)
+        self.update_serial = True
 
     def complete_delete(self, text, line, beginidx, endidx):
         records = self.current_domain.records()
