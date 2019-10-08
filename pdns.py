@@ -466,7 +466,28 @@ class DNSCommander(cmd.Cmd):
                 value = parts[2]
             else:
                 raise CommandException("Cannot parse %s" % line)
-        elif record_type in ['MX', 'SRV', 'TLSA', 'CAA']:
+        if record_type in ['CAA']:
+            # CAA is a little special
+            parts = line.split(None, 3)
+            if len(parts) == 4:
+                ttl = self.parse_ttl(parts[2])
+                value = parts[3]
+            elif len(parts) == 3:
+                value = parts[2]
+            else:
+                raise CommandException("Cannot parse %s" % line)
+            if value.split(None, 2) != 3:
+                raise CommandException("Cannot parse %s, CAA record format flag type \"value\"" % line)
+            caa_flag, caa_type, caa_value = value.split(None, 2)
+            try:
+                int(caa_flag)
+            except ValueError:
+                raise CommandException("Cannot parse %s, flag should be integer" % line)
+            if caa_type.strip() not in ['issue', 'issuewild', 'iodef']:
+                raise CommandException("Cannot parse %s, invalid CAA tag, choices issue, issuewild, iodef" % line)
+            if not caa_value.endswith('"') or not caa_value.startswith('"'):
+                raise CommandException("Cannot parse %s, CAA record third argument should be quoted" % line)
+        elif record_type in ['MX', 'SRV', 'TLSA']:
             parts = line.split(None, 4)
             if len(parts) == 5:
                 ttl = self.parse_ttl(parts[2])
@@ -512,9 +533,9 @@ class DNSCommander(cmd.Cmd):
            add key type [ttl] [priority] [weight] [port] value
 
         Key is for example www
-        type is record type, one of A, AAAA, CNAME, TXT, NS, MX, SRV, PTR
+        type is record type, one of A, AAAA, CNAME, TXT, NS, MX, SRV, PTR, CAA, TLSA
         ttl is opional time to live value
-        priority is used with MX and SRV records
+        priority is used with MX, CAA, TLSA and SRV records
         weight and port are SRV specific values
         """
         key, record_type, value, ttl, priority = self.parse_record(line)
